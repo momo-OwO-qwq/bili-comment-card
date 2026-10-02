@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -19,13 +20,40 @@ CACHE = os.path.join(ROOT, "cache")
 _RETRY_CODES = {-352, -412, -504, 412}
 
 
-def _get(url, referer="https://www.bilibili.com/", retries=3):
+_BUVID_COOKIE = None          # spi 官方匿名 Cookie，懒加载
+
+
+def _buvid_cookie():
+    """取 B 站官方匿名 buvid Cookie（finger/spi），失败返回 ''。
+
+    经验：seek_rpid 带官方匿名 Cookie 才能在风控期命中（实测 11:06 成功
+    路径即如此）；但全量分页接口带 Cookie 反而降级只回 3 条，所以 Cookie
+    仅用于锚点直达，不进全量抓取。自造 Cookie 一律不用。
+    """
+    global _BUVID_COOKIE
+    if _BUVID_COOKIE:
+        return _BUVID_COOKIE
+    try:
+        req = urllib.request.Request(
+            "https://api.bilibili.com/x/frontend/finger/spi",
+            headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        _BUVID_COOKIE = (f"buvid3={d['data']['b_3']}; "
+                         f"buvid4={d['data']['b_4']}")
+    except Exception:
+        _BUVID_COOKIE = ""
+    return _BUVID_COOKIE
+
+
+def _get(url, referer="https://www.bilibili.com/", retries=3, with_cookie=False):
     """带风控重试的 GET。
 
     经验：
     - -352 是 IP 级临时风控，重试太长只会让用户以为「卡死」，
       默认 3 次、退避封顶 8s，快速给出明确报错；
-    - 自造 Cookie 会触发降级（详情仍 -352、评论只回 3 条），不用。
+    - with_cookie=True 仅锚点直达使用（spi 官方匿名 buvid）；
+      全量分页带 Cookie 会降级只回 3 条，故不带。
     进度输出到 stderr 并 flush，保证用户能看到卡在哪。
     """
     import sys
@@ -42,6 +70,7 @@ def _get(url, referer="https://www.bilibili.com/", retries=3):
             "Referer": referer,
             "Origin": "https://www.bilibili.com",
             "Accept": "application/json, text/plain, */*",
+            **({"Cookie": _buvid_cookie()} if with_cookie else {}),
         })
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -116,8 +145,39 @@ def find_comment(comments, rpid):
     return None, False
 
 
+def _source_cache_path(kind, ident):
+    return os.path.join(CACHE, "source", f"{kind}_{ident}.json")
+
+
 def fetch_source(kind, ident):
-    """返回 source 描述 dict：动态拿正文，视频拿标题。"""
+    """来源信息，带本地缓存回落。
+
+    经验：-352 风控会封动态详情接口；成功抓过一次就落盘，之后接口
+    不可用时用缓存兜底（正文/作者/oid 不常变），配合锚点直达可在
+    风控期继续出图。
+    """
+    path = _source_cache_path(kind, ident)
+    try:
+        src = _fetch_source_live(kind, ident)
+    except Exception as e:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                src = json.load(f)
+            print(f"  ⓘ 来源接口不可用（{e}），使用本地缓存",
+                  file=sys.stderr, flush=True)
+            return src
+        raise
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(src, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass                        # 缓存写失败不影响主流程
+    return src
+
+
+def _fetch_source_live(kind, ident):
+    """实时抓取来源信息（无缓存）。"""
     if kind == "dynamic":
         d = _get("https://api.bilibili.com/x/polymer/web-dynamic/v1/detail"
                  f"?id={ident}")
@@ -243,35 +303,58 @@ def _fetch_sub_replies(source, root, shown):
     return subs
 
 
+def fetch_comment_by_anchor(source, rpid, with_replies=True):
+    """锚点直达：用 seek_rpid 单点拉取目标评论。
+
+    经验（-352 风控期实战）：全量分页接口被封时，seek_rpid 往往仍可用
+    ——它是网页点 #reply 锚点跳转的底层机制，一次请求直接返回目标评论
+    所在位置，不依赖全量列表。返回归一化后的单条评论 dict。
+
+    失败时抛 RuntimeError，调用方可回退到全量抓取 + find_comment。
+    """
+    referer = (f"https://t.bilibili.com/{source['id']}"
+               if source["kind"] == "dynamic" else
+               f"https://www.bilibili.com/video/{source['id']}")
+    q = urllib.parse.quote(json.dumps({"offset": ""}))
+    d = _get("https://api.bilibili.com/x/v2/reply/main"
+             f"?oid={source['oid']}&type={source['ctype']}&mode=3"
+             f"&pagination_str={q}&seek_rpid={rpid}"
+             "&web_location=333.1387", referer=referer, retries=2,
+             with_cookie=True)
+    if d.get("code") != 0:
+        raise RuntimeError(f"seek_rpid 失败：{d.get('code')} {d.get('message')}")
+    data = d.get("data") or {}
+    pool = (data.get("top_replies") or []) + (data.get("replies") or [])
+    # 目标是根评论
+    for r in pool:
+        if r["rpid"] == rpid:
+            subs = (_fetch_sub_replies(source, r, r.get("replies"))
+                    if with_replies else [])
+            return _norm(r, source, subs)
+    # 目标是楼中楼子评论（挂在某根评论的 replies 里）
+    for r in pool:
+        for ch in (r.get("replies") or []):
+            if ch["rpid"] == rpid:
+                return _norm(ch, source)
+    raise RuntimeError(f"seek_rpid 未找到目标评论 {rpid}")
+
+
 def fetch_comments(source, with_replies=True, limit=None):
     """产出评论结构列表（已归一化，方便渲染层直接使用）。"""
     roots = _walk_roots(source, limit=limit)
     out = []
     for r in roots:
         subs = _fetch_sub_replies(source, r, r.get("replies")) if with_replies else []
-        out.append({
-            "rpid": r["rpid"],
-            "mid": r["member"]["mid"],
-            "name": r["member"]["uname"],
-            "avatar": r["member"]["avatar"],
-            "level": (r["member"].get("level_info") or {}).get("current_level", 0),
-            "vip": (r["member"].get("vip") or {}).get("vipStatus", 0) == 1,
-            "is_up": r["member"]["mid"] == 0,      # 占位，渲染层用 source 判断
-            "text": r["content"]["message"],
-            "emote": r["content"].get("emote") or {},
-            "ctime": r["ctime"],
-            "like": r.get("like", 0),
-            "reply": r.get("rcount", 0),
-            "share": r.get("count", 0),            # 动态评论无转发数时为 0
-            # 经验：配图字段是 pictures[].img_src（不是 pics[].url，错用会漏图）
-            "pics": [p.get("img_src") for p in
-                     (r["content"].get("pictures") or []) if p.get("img_src")],
-            "children": [_norm(c, source) for c in (subs or [])],
-        })
+        out.append(_norm(r, source, subs))
     return out
 
 
-def _norm(c, source):
+def _norm(c, source, subs=None):
+    """归一化评论（根评论与楼中楼子评论通用）。
+
+    subs：根评论补全后的楼中楼列表（子评论传 None/[]）。
+    """
+    is_root = subs is not None
     return {
         "rpid": c["rpid"],
         "mid": c["member"]["mid"],
@@ -284,12 +367,12 @@ def _norm(c, source):
         "emote": c["content"].get("emote") or {},
         "ctime": c["ctime"],
         "like": c.get("like", 0),
-        "reply": 0,
-        "share": 0,
+        "reply": c.get("rcount", 0) if is_root else 0,
+        "share": c.get("count", 0) if is_root else 0,
         # 经验：配图字段是 pictures[].img_src（不是 pics[].url，错用会漏图）
         "pics": [p.get("img_src") for p in
                  (c["content"].get("pictures") or []) if p.get("img_src")],
-        "children": [],
+        "children": [_norm(x, source) for x in (subs or [])],
     }
 
 

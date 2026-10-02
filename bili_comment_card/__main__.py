@@ -68,20 +68,31 @@ def main(argv=None):
         return 3
     print(f"[2/3] 已获取（{source['author']} · {source['reply']} 条评论），拉取评论 …",
           flush=True)
-    try:
-        comments = api.fetch_comments(source,
-                                      with_replies=not a.no_replies, limit=a.limit)
-    except Exception as e:
-        print(f"[2/3] 拉取评论失败：{e}", file=sys.stderr, flush=True)
-        return 3
+    anchor = api.parse_anchor(a.url)
+    comments = None
+    # 锚点优先 seek_rpid 直达：风控期单点请求常仍可用，不依赖全量分页
+    if anchor is not None:
+        try:
+            comments = [api.fetch_comment_by_anchor(
+                source, anchor, with_replies=not a.no_replies)]
+            print(f"[2/3] 锚点直达命中（seek_rpid={anchor}）", flush=True)
+        except Exception as e:
+            print(f"[2/3] 锚点直达失败（{e}），回退全量抓取…",
+                  file=sys.stderr, flush=True)
+    if comments is None:
+        try:
+            comments = api.fetch_comments(
+                source, with_replies=not a.no_replies, limit=a.limit)
+        except Exception as e:
+            print(f"[2/3] 拉取评论失败：{e}", file=sys.stderr, flush=True)
+            return 3
     if a.single:
         if not 1 <= a.single <= len(comments):
             print(f"序号超出范围（共 {len(comments)} 条）", file=sys.stderr)
             return 2
         comments = [comments[a.single - 1]]
-    # 链接锚点 #reply<rid>：只渲染该条评论（支持楼中楼子评论）
-    anchor = api.parse_anchor(a.url)
-    if anchor is not None:
+    # 链接锚点 #reply<rid> 全量回退路径：在列表里定位目标评论
+    if anchor is not None and (len(comments) != 1 or comments[0]["rpid"] != anchor):
         hit, is_child = api.find_comment(comments, anchor)
         if hit is None:
             print(f"锚点评论 {anchor} 不在抓取结果里：可能被风控截断、"
