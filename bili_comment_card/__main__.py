@@ -60,11 +60,20 @@ def main(argv=None):
         p.error("缺少 URL（或使用 --list-fonts 查看字体）")
 
     kind, ident = api.parse_target(a.url)
-    print(f"[1/3] 目标：{kind} {ident} …")
-    source = api.fetch_source(kind, ident)
-    print(f"[2/3] 已获取（{source['author']} · {source['reply']} 条评论），拉取评论 …")
-    comments = api.fetch_comments(source,
-                                  with_replies=not a.no_replies, limit=a.limit)
+    print(f"[1/3] 目标：{kind} {ident} …", flush=True)
+    try:
+        source = api.fetch_source(kind, ident)
+    except Exception as e:
+        print(f"[2/3] 获取来源失败：{e}", file=sys.stderr, flush=True)
+        return 3
+    print(f"[2/3] 已获取（{source['author']} · {source['reply']} 条评论），拉取评论 …",
+          flush=True)
+    try:
+        comments = api.fetch_comments(source,
+                                      with_replies=not a.no_replies, limit=a.limit)
+    except Exception as e:
+        print(f"[2/3] 拉取评论失败：{e}", file=sys.stderr, flush=True)
+        return 3
     if a.single:
         if not 1 <= a.single <= len(comments):
             print(f"序号超出范围（共 {len(comments)} 条）", file=sys.stderr)

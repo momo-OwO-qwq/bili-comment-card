@@ -19,15 +19,24 @@ CACHE = os.path.join(ROOT, "cache")
 _RETRY_CODES = {-352, -412, -504, 412}
 
 
-def _get(url, referer="https://www.bilibili.com/", retries=6):
+def _get(url, referer="https://www.bilibili.com/", retries=3):
     """带风控重试的 GET。
 
-    经验：-352 会持续一段时间（IP 级风控），改用指数退避
-    2→4→8→16→32s；不带自造 Cookie（实测会触发降级只回 3 条）。
+    经验：
+    - -352 是 IP 级临时风控，重试太长只会让用户以为「卡死」，
+      默认 3 次、退避封顶 8s，快速给出明确报错；
+    - 自造 Cookie 会触发降级（详情仍 -352、评论只回 3 条），不用。
+    进度输出到 stderr 并 flush，保证用户能看到卡在哪。
     """
+    import sys
     import time as _time
     last = None
     for attempt in range(retries):
+        if attempt:
+            wait = min(2 ** attempt, 8)
+            print(f"  ⚠ 接口风控重试 {attempt + 1}/{retries}（{wait}s 后重试）…",
+                  file=sys.stderr, flush=True)
+            _time.sleep(wait)
         req = urllib.request.Request(url, headers={
             "User-Agent": UA,
             "Referer": referer,
@@ -35,18 +44,23 @@ def _get(url, referer="https://www.bilibili.com/", retries=6):
             "Accept": "application/json, text/plain, */*",
         })
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:          # 网络层错误也退避重试
+        except Exception as e:          # 网络层错误也重试
             last = e
-            _time.sleep(min(2 ** attempt, 32))
             continue
         if data.get("code") in _RETRY_CODES:
             last = RuntimeError(f"{data.get('code')} {data.get('message')}")
-            _time.sleep(min(2 ** (attempt + 1), 32))
             continue
+        if data.get("code") != 0:
+            raise RuntimeError(f"接口返回 {data.get('code')}：{data.get('message')}")
         return data
-    raise last if isinstance(last, Exception) else RuntimeError(str(last))
+    if last is None:
+        last = RuntimeError("接口无响应")
+    raise RuntimeError(
+        f"请求失败（{last}）：B 站可能对该 IP 触发了临时风控（-352/-412）。"
+        "这不是卡死——风控通常几分钟到几小时恢复，稍后重试即可；"
+        "或换网络/热点再试。") from last
 
 
 # --------------------------------------------------------------------------
