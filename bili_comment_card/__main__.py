@@ -79,6 +79,18 @@ def main(argv=None):
             print(f"序号超出范围（共 {len(comments)} 条）", file=sys.stderr)
             return 2
         comments = [comments[a.single - 1]]
+    # 链接锚点 #reply<rid>：只渲染该条评论（支持楼中楼子评论）
+    anchor = api.parse_anchor(a.url)
+    if anchor is not None:
+        hit, is_child = api.find_comment(comments, anchor)
+        if hit is None:
+            print(f"锚点评论 {anchor} 不在抓取结果里：可能被风控截断、"
+                  "已删除，或超出 --limit 范围（去掉 limit 重试）。",
+                  file=sys.stderr, flush=True)
+            return 2
+        comments = [hit]
+        print(f"[3/3] 锚点命中{'（楼中楼）' if is_child else ''}："
+              f"{hit['name']} 的评论", flush=True)
     print(f"[3/3] 渲染 {len(comments)} 张卡片（{a.theme} 主题）…")
 
     opt = render.Options(
@@ -89,11 +101,12 @@ def main(argv=None):
     os.makedirs(a.out, exist_ok=True)
     label = "动态" if kind == "dynamic" else "视频"
 
-    if a.single:
-        # 单条卡片：不重复带主动态头
+    # 锚点/单条模式都不带主动态头
+    if a.single or api.parse_anchor(a.url):
         page = render.build_html(source, comments, opt,
                                  numbered=a.numbered, with_header=False)
-        out = os.path.join(a.out, f"{label}{ident}-评论{a.single:02d}.png")
+        tag = a.single if a.single else f"r{api.parse_anchor(a.url)}"
+        out = os.path.join(a.out, f"{label}{ident}-评论{tag}.png")
         render.screenshot(page, out, opt)
         print(f"完成：{out}")
         return 0

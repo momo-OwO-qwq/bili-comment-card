@@ -22,13 +22,16 @@ sudo apt install chromium python3-pil   # 按需
 cd ~/Documents/bili-comment-card
 
 # 动态：全部评论（长图 + 每条评论各一张单卡）
-python3 -m bili_comment_card "https://t.bilibili.com/1119499641096765447"
+python3 -m bili_comment_card "<动态链接>"
 
 # 视频：全部评论
-python3 -m bili_comment_card "https://www.bilibili.com/video/BV1GJ411x7h7"
+python3 -m bili_comment_card "<视频链接>"
 
 # 只出第 N 条评论（1 起）
 python3 -m bili_comment_card <链接> --single 11
+
+# 只出链接锚点指向的那条评论（支持 #reply<id> 楼中楼定位）
+python3 -m bili_comment_card "<链接>#reply<评论id>"
 ```
 
 ### 常用选项
@@ -66,6 +69,7 @@ python3 -m bili_comment_card <链接> --share --numbered
 - `<来源><ID>-全部评论.png` — 所有评论合成的长图
 - `<来源><ID>-评论01.png …` — 每条评论一张单卡
 - `--single N` 时只生成 `<来源><ID>-评论NN.png`
+- 带 `#reply<id>` 锚点时只生成该条评论的单卡，文件名为 `<来源><ID>-评论r<id>.png`
 
 默认 3 倍分辨率（`--scale 2/3/4` 可调），自动裁剪留白、框外透明，可直接进视频。
 

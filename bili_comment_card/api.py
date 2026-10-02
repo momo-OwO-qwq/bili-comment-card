@@ -93,6 +93,29 @@ def parse_target(s):
 # 来源信息
 # --------------------------------------------------------------------------
 
+def parse_anchor(s):
+    """提取链接锚点里的目标评论 rpid（如 ...#reply315705541057）。
+
+    没有锚点返回 None；存在锚点返回 int rpid。
+    """
+    m = re.search(r"#reply(\d+)", s or "")
+    return int(m.group(1)) if m else None
+
+
+def find_comment(comments, rpid):
+    """按 rpid 定位评论，支持楼中楼子评论。
+
+    返回 (comment, is_child)；未找到返回 (None, False)。
+    """
+    for c in comments:
+        if c["rpid"] == rpid:
+            return c, False
+        for ch in c.get("children") or []:
+            if ch["rpid"] == rpid:
+                return ch, True
+    return None, False
+
+
 def fetch_source(kind, ident):
     """返回 source 描述 dict：动态拿正文，视频拿标题。"""
     if kind == "dynamic":
